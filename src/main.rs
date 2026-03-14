@@ -2,7 +2,6 @@ mod canvas;
 mod gpu;
 mod layers;
 
-use std::sync::Arc;
 use eframe::egui;
 use layers::BlendMode;
 

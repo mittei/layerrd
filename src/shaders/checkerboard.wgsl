@@ -7,7 +7,7 @@ struct VertexOutput {
 }
 
 struct CanvasParams {
-    // Canvas rect in clip space (NDC)
+    // Canvas rect in UV space [0,1]
     canvas_min: vec2<f32>,
     canvas_max: vec2<f32>,
     // Viewport size in pixels
@@ -18,8 +18,7 @@ struct CanvasParams {
 }
 
 @group(0) @binding(0) var canvas_tex: texture_2d<f32>;
-@group(0) @binding(1) var canvas_sampler: sampler;
-@group(0) @binding(2) var<uniform> params: CanvasParams;
+@group(0) @binding(1) var<uniform> params: CanvasParams;
 
 // Full-screen triangle
 @vertex
@@ -55,8 +54,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let is_light = (checker_coord.x + checker_coord.y) % 2 == 0;
     let checker_color = select(vec3<f32>(0.6), vec3<f32>(0.8), is_light);
 
-    // Sample the canvas texture
-    let tex_color = textureSample(canvas_tex, canvas_sampler, canvas_uv);
+    // Load the canvas texture using integer coordinates (no sampler needed)
+    let tex_dims = textureDimensions(canvas_tex);
+    let tex_coord = vec2<i32>(
+        i32(canvas_uv.x * f32(tex_dims.x)),
+        i32(canvas_uv.y * f32(tex_dims.y))
+    );
+    let clamped = clamp(tex_coord, vec2<i32>(0), vec2<i32>(tex_dims) - vec2<i32>(1));
+    let tex_color = textureLoad(canvas_tex, clamped, 0);
 
     // Composite: canvas over checkerboard
     let out_rgb = tex_color.rgb * tex_color.a + checker_color * (1.0 - tex_color.a);
