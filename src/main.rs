@@ -299,16 +299,10 @@ impl eframe::App for LayerrdApp {
                 viewport_size: [viewport_size.x, viewport_size.y],
             };
 
-            let paint_callback = egui::PaintCallback {
-                rect,
-                callback: Arc::new(
-                    egui_wgpu::Callback::new_paint_callback(rect, callback),
-                ),
-            };
-
             // Allocate the space and add the paint callback
             ui.allocate_rect(rect, egui::Sense::click_and_drag());
-            ui.painter().add(paint_callback);
+            ui.painter()
+                .add(egui_wgpu::Callback::new_paint_callback(rect, callback));
         });
     }
 }
