@@ -181,7 +181,7 @@ impl eframe::App for LayerrdApp {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // Properties for selected layer
-                    ui.collapsing("Properties", |ui| {
+                    egui::CollapsingHeader::new("Properties").default_open(true).show(ui, |ui| {
                         if let Some(layer) = self
                             .document
                             .layers
@@ -224,7 +224,7 @@ impl eframe::App for LayerrdApp {
                     ui.separator();
 
                     // Layers list
-                    ui.collapsing("Layers", |ui| {
+                    egui::CollapsingHeader::new("Layers").default_open(true).show(ui, |ui| {
                         let mut dirty = false;
                         for i in (0..self.document.layers.len()).rev() {
                             let layer = &mut self.document.layers[i];
