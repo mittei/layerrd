@@ -9,15 +9,33 @@ const TOOLS: &[&str] = &[
     "Select", "Move", "Brush", "Eraser", "Fill", "Text", "Eyedropper", "Crop",
 ];
 
+#[derive(Clone, Copy)]
+enum ViewAction {
+    ZoomIn,
+    ZoomOut,
+    FitToWindow,
+    ZoomTo100,
+}
+
 struct LayerrdApp {
     selected_tool: usize,
     document: layers::Document,
     pipelines: gpu::GpuPipelines,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    // Zoom/pan state (view-only, not saved with document)
+    zoom_level: f32,
+    pan_offset: egui::Vec2,
+    is_panning: bool,
+    pending_view_action: Option<ViewAction>,
+    last_viewport_size: egui::Vec2,
 }
 
 impl LayerrdApp {
+    const ZOOM_MIN: f32 = 0.01;
+    const ZOOM_MAX: f32 = 64.0;
+    const ZOOM_STEP: f32 = 1.15;
+
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let wgpu_state = cc
             .wgpu_render_state
@@ -48,7 +66,85 @@ impl LayerrdApp {
             pipelines,
             device,
             queue,
+            zoom_level: 1.0,
+            pan_offset: egui::Vec2::ZERO,
+            is_panning: false,
+            pending_view_action: None,
+            last_viewport_size: egui::Vec2::new(1280.0, 800.0),
         }
+    }
+
+    /// Base scale that fits the canvas into the viewport with padding.
+    fn fit_scale(&self, viewport_size: egui::Vec2) -> f32 {
+        let canvas_w = self.document.width as f32;
+        let canvas_h = self.document.height as f32;
+        (viewport_size.x / canvas_w)
+            .min(viewport_size.y / canvas_h)
+            .min(1.0)
+            * 0.9
+    }
+
+    /// Reset to fit-to-window view.
+    fn fit_to_window(&mut self) {
+        self.zoom_level = 1.0;
+        self.pan_offset = egui::Vec2::ZERO;
+    }
+
+    /// Zoom to 100% (1 canvas pixel = 1 screen pixel), centered.
+    fn zoom_to_100(&mut self, viewport_size: egui::Vec2) {
+        let base = self.fit_scale(viewport_size);
+        self.zoom_level = 1.0 / base;
+        self.pan_offset = egui::Vec2::ZERO;
+    }
+
+    /// Zoom by a factor centered on a viewport-space cursor position.
+    fn zoom_around(
+        &mut self,
+        factor: f32,
+        center: egui::Pos2,
+        viewport_rect: egui::Rect,
+        viewport_size: egui::Vec2,
+    ) {
+        let old_zoom = self.zoom_level;
+        let new_zoom = (self.zoom_level * factor).clamp(Self::ZOOM_MIN, Self::ZOOM_MAX);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            return;
+        }
+
+        let base_scale = self.fit_scale(viewport_size);
+
+        // Cursor position in viewport UV [0,1]
+        let cursor_uv = egui::vec2(
+            (center.x - viewport_rect.min.x) / viewport_size.x,
+            (center.y - viewport_rect.min.y) / viewport_size.y,
+        );
+
+        // Canvas-space point under cursor (in canvas pixels from canvas center)
+        let old_effective = base_scale * old_zoom;
+        let canvas_point = egui::vec2(
+            (cursor_uv.x - 0.5) * viewport_size.x / old_effective + self.pan_offset.x,
+            (cursor_uv.y - 0.5) * viewport_size.y / old_effective + self.pan_offset.y,
+        );
+
+        // Adjust pan so the same canvas point stays under cursor at new zoom
+        let new_effective = base_scale * new_zoom;
+        self.pan_offset = egui::vec2(
+            canvas_point.x - (cursor_uv.x - 0.5) * viewport_size.x / new_effective,
+            canvas_point.y - (cursor_uv.y - 0.5) * viewport_size.y / new_effective,
+        );
+
+        self.zoom_level = new_zoom;
+    }
+
+    /// Zoom by a factor centered on the viewport center.
+    fn zoom_centered(&mut self, factor: f32, viewport_rect: egui::Rect, viewport_size: egui::Vec2) {
+        let center = viewport_rect.center();
+        self.zoom_around(factor, center, viewport_rect, viewport_size);
+    }
+
+    /// Actual zoom percentage (100% = 1 canvas pixel = 1 screen pixel).
+    fn zoom_percentage(&self, viewport_size: egui::Vec2) -> f32 {
+        self.fit_scale(viewport_size) * self.zoom_level * 100.0
     }
 }
 
@@ -82,9 +178,23 @@ impl eframe::App for LayerrdApp {
                     if ui.button("Paste").clicked() { ui.close(); }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.button("Zoom In").clicked() { ui.close(); }
-                    if ui.button("Zoom Out").clicked() { ui.close(); }
-                    if ui.button("Fit to Window").clicked() { ui.close(); }
+                    if ui.button("Zoom In").clicked() {
+                        self.pending_view_action = Some(ViewAction::ZoomIn);
+                        ui.close();
+                    }
+                    if ui.button("Zoom Out").clicked() {
+                        self.pending_view_action = Some(ViewAction::ZoomOut);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Fit to Window").clicked() {
+                        self.pending_view_action = Some(ViewAction::FitToWindow);
+                        ui.close();
+                    }
+                    if ui.button("Zoom to 100%").clicked() {
+                        self.pending_view_action = Some(ViewAction::ZoomTo100);
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Image", |ui| {
                     if ui.button("Brightness/Contrast").clicked() { ui.close(); }
@@ -140,6 +250,11 @@ impl eframe::App for LayerrdApp {
                 ui.label(format!(
                     "Layers: {}",
                     self.document.layers.len()
+                ));
+                ui.separator();
+                ui.label(format!(
+                    "Zoom: {:.0}%",
+                    self.zoom_percentage(self.last_viewport_size)
                 ));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("GPU Accelerated");
@@ -271,23 +386,95 @@ impl eframe::App for LayerrdApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
             let viewport_size = rect.size();
+            self.last_viewport_size = viewport_size;
 
-            // Calculate canvas position centered in the panel
+            // --- Input handling ---
+            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+
+            // Scroll wheel: zoom centered on cursor
+            if response.hovered() {
+                let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
+                if scroll_delta.abs() > 0.1 {
+                    if let Some(hover_pos) = response.hover_pos() {
+                        // Scale factor proportionally: ~50 points per mouse tick
+                        let ticks = scroll_delta / 50.0;
+                        let factor = Self::ZOOM_STEP.powf(ticks);
+                        self.zoom_around(factor, hover_pos, rect, viewport_size);
+                    }
+                }
+            }
+
+            // Space + left-drag OR middle mouse drag: pan
+            let space_held = ui.input(|i| i.key_down(egui::Key::Space));
+            self.is_panning = space_held;
+
+            let panning = (space_held && response.dragged_by(egui::PointerButton::Primary))
+                || response.dragged_by(egui::PointerButton::Middle);
+
+            if panning {
+                let drag = response.drag_delta();
+                let base_scale = self.fit_scale(viewport_size);
+                let effective_scale = base_scale * self.zoom_level;
+                // Convert screen-pixel drag to canvas-pixel offset
+                self.pan_offset.x -= drag.x / effective_scale;
+                self.pan_offset.y -= drag.y / effective_scale;
+            }
+
+            // Pan cursor
+            if self.is_panning {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            }
+
+            // Keyboard shortcuts: Ctrl+Plus, Ctrl+Minus, Ctrl+0, Ctrl+1
+            let (zoom_in, zoom_out, fit, actual) = ctx.input(|i| {
+                (
+                    i.modifiers.command
+                        && (i.key_pressed(egui::Key::Plus)
+                            || i.key_pressed(egui::Key::Equals)),
+                    i.modifiers.command && i.key_pressed(egui::Key::Minus),
+                    i.modifiers.command && i.key_pressed(egui::Key::Num0),
+                    i.modifiers.command && i.key_pressed(egui::Key::Num1),
+                )
+            });
+
+            if zoom_in {
+                self.zoom_centered(Self::ZOOM_STEP, rect, viewport_size);
+            }
+            if zoom_out {
+                self.zoom_centered(1.0 / Self::ZOOM_STEP, rect, viewport_size);
+            }
+            if fit {
+                self.fit_to_window();
+            }
+            if actual {
+                self.zoom_to_100(viewport_size);
+            }
+
+            // Process deferred View menu actions
+            if let Some(action) = self.pending_view_action.take() {
+                match action {
+                    ViewAction::ZoomIn => self.zoom_centered(Self::ZOOM_STEP, rect, viewport_size),
+                    ViewAction::ZoomOut => {
+                        self.zoom_centered(1.0 / Self::ZOOM_STEP, rect, viewport_size)
+                    }
+                    ViewAction::FitToWindow => self.fit_to_window(),
+                    ViewAction::ZoomTo100 => self.zoom_to_100(viewport_size),
+                }
+            }
+
+            // --- Compute canvas_rect_min/max from zoom/pan state ---
             let canvas_w = self.document.width as f32;
             let canvas_h = self.document.height as f32;
+            let base_scale = self.fit_scale(viewport_size);
+            let effective_scale = base_scale * self.zoom_level;
+            let display_w = canvas_w * effective_scale;
+            let display_h = canvas_h * effective_scale;
 
-            // Fit canvas into viewport with some padding
-            let scale = (viewport_size.x / canvas_w)
-                .min(viewport_size.y / canvas_h)
-                .min(1.0)
-                * 0.9;
+            let pan_uv_x = self.pan_offset.x * effective_scale / viewport_size.x;
+            let pan_uv_y = self.pan_offset.y * effective_scale / viewport_size.y;
 
-            let display_w = canvas_w * scale;
-            let display_h = canvas_h * scale;
-
-            // Canvas rect in UV space [0,1] relative to the panel
-            let cx = 0.5;
-            let cy = 0.5;
+            let cx = 0.5 - pan_uv_x;
+            let cy = 0.5 - pan_uv_y;
             let half_w = display_w / viewport_size.x * 0.5;
             let half_h = display_h / viewport_size.y * 0.5;
 
@@ -298,8 +485,6 @@ impl eframe::App for LayerrdApp {
                 viewport_size: [viewport_size.x, viewport_size.y],
             };
 
-            // Allocate the space and add the paint callback
-            ui.allocate_rect(rect, egui::Sense::click_and_drag());
             ui.painter()
                 .add(egui_wgpu::Callback::new_paint_callback(rect, callback));
         });
