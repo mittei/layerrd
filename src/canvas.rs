@@ -17,7 +17,6 @@ pub struct CanvasParams {
 pub struct CanvasRenderResources {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
-    pub sampler: wgpu::Sampler,
 }
 
 impl CanvasRenderResources {
@@ -33,27 +32,20 @@ impl CanvasRenderResources {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("canvas_bgl"),
                 entries: &[
-                    // canvas texture
+                    // canvas texture (non-filterable, used with textureLoad)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
                         count: None,
                     },
-                    // sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
                     // params uniform
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 1,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -101,17 +93,9 @@ impl CanvasRenderResources {
             cache: None,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("canvas_sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
         Self {
             pipeline,
             bind_group_layout,
-            sampler,
         }
     }
 }
@@ -161,10 +145,6 @@ impl egui_wgpu::CallbackTrait for CanvasPaintCallback {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&resources.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
                     resource: params_buf.as_entire_binding(),
                 },
             ],
